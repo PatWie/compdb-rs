@@ -93,6 +93,7 @@ fn find_header_files(
 ) -> Result<Vec<CompileCommand>> {
     // Build per-file include maps
     let file_to_includes: FxDashMap<PathBuf, Vec<PathBuf>> = FxDashMap::default();
+    let file_to_command: FxDashMap<PathBuf, CompileCommand> = FxDashMap::default();
     let mut all_system_dirs_set: FxHashSet<PathBuf> = FxHashSet::default();
 
     for cmd in compile_commands {
@@ -100,11 +101,13 @@ fn find_header_files(
         let (project_dirs, system_dirs) = extract_include_directories_for_command(cmd);
         all_system_dirs_set.extend(system_dirs.clone());
         let all_dirs: Vec<PathBuf> = project_dirs.into_iter().chain(system_dirs.into_iter()).collect();
-        file_to_includes.insert(file_path, all_dirs);
+        file_to_includes.insert(file_path.clone(), all_dirs);
+        file_to_command.insert(file_path, cmd.clone());
     }
     let all_system_dirs: Vec<PathBuf> = all_system_dirs_set.into_iter().collect();
 
     let processed_headers: FxDashSet<String> = FxDashSet::default();
+    let header_to_source: FxDashMap<String, PathBuf> = FxDashMap::default(); // Track which source included each header
     let resolve_cache: FxDashMap<ResolveCacheKey, Option<String>> = FxDashMap::default();
     let exists_cache: FxDashMap<PathBuf, bool> = FxDashMap::default();
 
@@ -150,6 +153,9 @@ fn find_header_files(
                                 for include in includes {
                                     if let Some(header_path_str) = resolve_header_path(&include, &include_dirs, &file_path, &resolve_cache, &exists_cache) {
                                         if processed_headers.insert(header_path_str.clone()) {
+                                            // Track which source file included this header
+                                            header_to_source.insert(header_path_str.clone(), context_path.clone());
+                                            
                                             if !is_system_header(&header_path_str, &all_system_dirs) {
                                                 let header_path = PathBuf::from(header_path_str);
                                                 // Propagate the original context
@@ -166,15 +172,24 @@ fn find_header_files(
         }
     });
 
-    let first_cmd = compile_commands.first().context("No compile commands found")?;
     let header_commands: Vec<CompileCommand> = processed_headers
         .into_iter()
-        .map(|header_path| CompileCommand {
-            directory: first_cmd.directory.clone(),
-            file: header_path,
-            command: first_cmd.command.clone(),
-            arguments: first_cmd.arguments.clone(),
-            output: None,
+        .filter_map(|header_path| {
+            // Find the source file that included this header
+            if let Some(source_path_ref) = header_to_source.get(&header_path) {
+                let source_path = source_path_ref.value();
+                if let Some(source_cmd_ref) = file_to_command.get(source_path) {
+                    let source_cmd = source_cmd_ref.value();
+                    return Some(CompileCommand {
+                        directory: source_cmd.directory.clone(),
+                        file: header_path,
+                        command: source_cmd.command.clone(),
+                        arguments: source_cmd.arguments.clone(),
+                        output: None,
+                    });
+                }
+            }
+            None
         })
         .collect();
 
