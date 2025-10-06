@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossbeam_deque::{Injector, Steal};
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use regex::Regex;
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,6 @@ use std::sync::LazyLock;
 
 // Fast hasher type aliases
 type FxDashMap<K, V> = DashMap<K, V, BuildHasherDefault<FxHasher>>;
-type FxDashSet<T> = DashSet<T, BuildHasherDefault<FxHasher>>;
 type FxHashSet<T> = HashSet<T, BuildHasherDefault<FxHasher>>;
 
 // Directory ID mapping for ultra-fast cache keys
@@ -106,8 +105,7 @@ fn find_header_files(
     }
     let all_system_dirs: Vec<PathBuf> = all_system_dirs_set.into_iter().collect();
 
-    let processed_headers: FxDashSet<String> = FxDashSet::default();
-    let header_to_source: FxDashMap<String, PathBuf> = FxDashMap::default(); // Track which source included each header
+    let processed_headers: FxDashMap<String, PathBuf> = FxDashMap::default(); // header -> source that found it
     let resolve_cache: FxDashMap<ResolveCacheKey, Option<String>> = FxDashMap::default();
     let exists_cache: FxDashMap<PathBuf, bool> = FxDashMap::default();
 
@@ -152,13 +150,9 @@ fn find_header_files(
                                 let includes = extract_includes(&content);
                                 for include in includes {
                                     if let Some(header_path_str) = resolve_header_path(&include, &include_dirs, &file_path, &resolve_cache, &exists_cache) {
-                                        if processed_headers.insert(header_path_str.clone()) {
-                                            // Track which source file included this header
-                                            header_to_source.insert(header_path_str.clone(), context_path.clone());
-                                            
+                                        if processed_headers.insert(header_path_str.clone(), context_path.clone()).is_none() {
                                             if !is_system_header(&header_path_str, &all_system_dirs) {
                                                 let header_path = PathBuf::from(header_path_str);
-                                                // Propagate the original context
                                                 local_work.push((header_path, context_path.clone()));
                                             }
                                         }
@@ -174,20 +168,16 @@ fn find_header_files(
 
     let header_commands: Vec<CompileCommand> = processed_headers
         .into_iter()
-        .filter_map(|header_path| {
-            // Find the source file that included this header
-            if let Some(source_path_ref) = header_to_source.get(&header_path) {
-                let source_path = source_path_ref.value();
-                if let Some(source_cmd_ref) = file_to_command.get(source_path) {
-                    let source_cmd = source_cmd_ref.value();
-                    return Some(CompileCommand {
-                        directory: source_cmd.directory.clone(),
-                        file: header_path,
-                        command: source_cmd.command.clone(),
-                        arguments: source_cmd.arguments.clone(),
-                        output: None,
-                    });
-                }
+        .filter_map(|(header_path, source_path)| {
+            if let Some(source_cmd_ref) = file_to_command.get(&source_path) {
+                let source_cmd = source_cmd_ref.value();
+                return Some(CompileCommand {
+                    directory: source_cmd.directory.clone(),
+                    file: header_path,
+                    command: source_cmd.command.clone(),
+                    arguments: source_cmd.arguments.clone(),
+                    output: None,
+                });
             }
             None
         })
