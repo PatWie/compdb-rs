@@ -50,6 +50,12 @@ struct Cli {
     build_paths: Vec<PathBuf>,
 
     #[arg(
+        long = "no-canonicalize",
+        help = "Don't canonicalize paths (keep them as-is without resolving symlinks)"
+    )]
+    no_canonicalize: bool,
+
+    #[arg(
         value_enum,
         default_value = "list",
         help = "Command to execute"
@@ -87,8 +93,21 @@ fn extract_includes(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => { components.pop(); },
+            c => components.push(c),
+        }
+    }
+    components.iter().collect()
+}
+
 fn find_header_files(
     compile_commands: &[CompileCommand],
+    canonicalize: bool,
 ) -> Result<Vec<CompileCommand>> {
     // Build per-file include maps
     let file_to_includes: FxDashMap<PathBuf, Vec<PathBuf>> = FxDashMap::default();
@@ -149,7 +168,7 @@ fn find_header_files(
                             if let Ok(content) = fs::read_to_string(&file_path) {
                                 let includes = extract_includes(&content);
                                 for include in includes {
-                                    if let Some(header_path_str) = resolve_header_path(&include, &include_dirs, &file_path, &resolve_cache, &exists_cache) {
+                                    if let Some(header_path_str) = resolve_header_path(&include, &include_dirs, &file_path, &resolve_cache, &exists_cache, canonicalize) {
                                         if processed_headers.insert(header_path_str.clone(), context_path.clone()).is_none() {
                                             if !is_system_header(&header_path_str, &all_system_dirs) {
                                                 let header_path = PathBuf::from(header_path_str);
@@ -258,6 +277,7 @@ fn resolve_header_path(
     source_file: &Path,
     cache: &FxDashMap<ResolveCacheKey, Option<String>>,
     exists_cache: &FxDashMap<PathBuf, bool>,
+    canonicalize: bool,
 ) -> Option<String> {
     let source_dir = source_file.parent().unwrap_or_else(|| Path::new(""));
 
@@ -278,11 +298,20 @@ fn resolve_header_path(
     let exists_results = batch_check_exists(&candidate_paths, exists_cache);
 
     let result = if exists_results[0] {
-        fs::canonicalize(&relative_path).ok().and_then(|p| p.to_str().map(String::from))
+        if canonicalize {
+            fs::canonicalize(&relative_path).ok().and_then(|p| p.to_str().map(String::from))
+        } else {
+            normalize_path(&relative_path).to_str().map(String::from)
+        }
     } else {
         for (i, exists) in exists_results.iter().skip(1).enumerate() {
             if *exists {
-                return fs::canonicalize(&candidate_paths[i + 1]).ok().and_then(|p| p.to_str().map(String::from));
+                let path = &candidate_paths[i + 1];
+                return if canonicalize {
+                    fs::canonicalize(path).ok().and_then(|p| p.to_str().map(String::from))
+                } else {
+                    normalize_path(path).to_str().map(String::from)
+                };
             }
         }
         None
@@ -333,7 +362,7 @@ fn list_command(cli: &Cli) -> Result<()> {
     }
 
     // Extract header files
-    let header_commands = find_header_files(&all_commands)?;
+    let header_commands = find_header_files(&all_commands, !cli.no_canonicalize)?;
 
     // Combine original commands with header commands
     all_commands.extend(header_commands);
