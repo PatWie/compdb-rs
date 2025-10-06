@@ -278,11 +278,11 @@ fn resolve_header_path(
     let exists_results = batch_check_exists(&candidate_paths, exists_cache);
 
     let result = if exists_results[0] {
-        relative_path.to_str().map(String::from)
+        fs::canonicalize(&relative_path).ok().and_then(|p| p.to_str().map(String::from))
     } else {
         for (i, exists) in exists_results.iter().skip(1).enumerate() {
             if *exists {
-                return candidate_paths[i + 1].to_str().map(String::from);
+                return fs::canonicalize(&candidate_paths[i + 1]).ok().and_then(|p| p.to_str().map(String::from));
             }
         }
         None
